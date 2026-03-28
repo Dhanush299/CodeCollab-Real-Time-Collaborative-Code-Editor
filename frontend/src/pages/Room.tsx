@@ -30,6 +30,7 @@ const Room = () => {
   const [runError, setRunError] = useState('');
   const [runTime, setRunTime] = useState(null);
   const [runLoading, setRunLoading] = useState(false);
+  const [htmlPreview, setHtmlPreview] = useState('');
   const [files, setFiles] = useState([]);
   const [currentFile, setCurrentFile] = useState(null);
   const [showCreateModal, setShowCreateModal] = useState(false);
@@ -73,6 +74,49 @@ const Room = () => {
   const repositoryIdRef = useRef(null);
   const historyStackRef = useRef([]);
   const redoStackRef = useRef([]);
+
+  // Bridge so HTML running in an iframe can send console output back to this page.
+  const injectedBridgeScript = useMemo(() => {
+    return `
+      <script>
+        (function() {
+          function stringifyArgs(args) {
+            try { return Array.prototype.slice.call(args).map(function(a){ return String(a); }).join(' '); }
+            catch (e) { return ''; }
+          }
+          function send(type, msg) {
+            try {
+              window.parent.postMessage({ __codecollabRun: true, type: type, message: msg }, '*');
+            } catch (e) {}
+          }
+          var origLog = console.log;
+          console.log = function() {
+            try { origLog.apply(console, arguments); } catch(e) {}
+            send('log', stringifyArgs(arguments));
+          };
+          var origError = console.error;
+          console.error = function() {
+            try { origError.apply(console, arguments); } catch(e) {}
+            send('error', stringifyArgs(arguments));
+          };
+        })();
+      </script>
+    `;
+  }, []);
+
+  useEffect(() => {
+    const onMessage = (event: MessageEvent) => {
+      const data: any = event.data;
+      if (!data || !data.__codecollabRun) return;
+      if (data.type === 'error') {
+        setRunError((prev) => (prev ? prev + '\n' + data.message : data.message));
+      } else {
+        setRunOutput((prev) => (prev ? prev + '\n' + data.message : data.message));
+      }
+    };
+    window.addEventListener('message', onMessage);
+    return () => window.removeEventListener('message', onMessage);
+  }, []);
   const [brushColor, setBrushColor] = useState('#00c853');
   const [brushSize, setBrushSize] = useState(3);
   const brushColorRef = useRef('#00c853');
@@ -1748,9 +1792,96 @@ const Room = () => {
     setRunError('');
     setRunTime(null);
     try {
+      const language = String(currentFile?.language || 'javascript').toLowerCase();
+
+      // For HTML, render/run in the browser (iframe) via HTTP preview.
+      if (language === 'html') {
+        setHtmlPreview('');
+
+        const trimmed = code?.trim() || '';
+        if (!trimmed) {
+          setRunError('No HTML code to run.');
+          return;
+        }
+
+        const bridgeApplied = /<\/head>/i.test(code)
+          ? code.replace(/<\/head>/i, `${injectedBridgeScript}</head>`)
+          : `${injectedBridgeScript}${code}`;
+
+        try {
+          const extractAssetRefs = (html: string) => {
+            const refs = new Set<string>();
+            for (const m of html.matchAll(/<script[^>]*\s+src\s*=\s*["']([^"']+)["'][^>]*>/gi)) {
+              const v = m[1];
+              if (v) refs.add(v);
+            }
+            for (const m of html.matchAll(/<link[^>]*\s+href\s*=\s*["']([^"']+)["'][^>]*>/gi)) {
+              const v = m[1];
+              if (v) refs.add(v);
+            }
+            return Array.from(refs);
+          };
+
+          const normalizeRefPath = (ref: string) => {
+            const clean = String(ref).split('#')[0].split('?')[0].trim();
+            return clean.replace(/^(\.\/)+/, '').replace(/^\//, '');
+          };
+
+          const flattenFiles = (nodes: any[]) => {
+            const out: any[] = [];
+            const stack: any[] = Array.isArray(nodes) ? [...nodes] : [];
+            while (stack.length) {
+              const n = stack.pop();
+              if (!n) continue;
+              if (Array.isArray(n.children)) stack.push(...n.children);
+              if (!n.isFolder) out.push(n);
+            }
+            return out;
+          };
+
+          const flat = flattenFiles(files);
+          const refs = extractAssetRefs(code);
+          const assets: Array<{ path: string; content: string }> = [];
+
+          const findMatchingFile = (refRel: string) => {
+            const fileName = refRel.split('/').pop() || refRel;
+            return flat.find((f) => f.name === fileName || f.path === refRel || String(f.path || '').endsWith('/' + fileName));
+          };
+
+          if (flat.length === 0) {
+            setRunError('No repository files loaded for HTML preview.');
+            return;
+          }
+
+          for (const ref of refs) {
+            const refRel = normalizeRefPath(ref);
+            const fileNode = findMatchingFile(refRel);
+            if (!fileNode) continue;
+            const resp = await axios.get(`/files/${fileNode._id}`);
+            const content = resp.data?.file?.content ?? '';
+            assets.push({ path: refRel, content });
+          }
+
+          const previewResp = await axios.post('/preview/create', {
+            html: bridgeApplied,
+            assets
+          });
+
+          setHtmlPreview(previewResp.data.url);
+          setRunLoading(false);
+          return;
+        } catch (e: any) {
+          setRunError(e?.response?.data?.message || e?.message || 'Failed to create HTML preview');
+          return;
+        }
+      }
+
+      // Non-HTML languages use the backend executor.
+      setHtmlPreview('');
+
       const response = await axios.post('/execute', {
         code,
-        language: currentFile?.language || 'javascript',
+        language,
         roomId,
         fileId: currentFile?._id || null,
         filePath: currentFile?.path || currentFile?.name || null
@@ -1931,6 +2062,23 @@ const Room = () => {
                 <span>Output</span>
                 {runTime !== null && <small>Time: {runTime} ms</small>}
               </div>
+
+              {String(currentFile?.language || '').toLowerCase() === 'html' && htmlPreview && (
+                <div className="html-preview" style={{ marginBottom: '0.75rem' }}>
+                  <h4 style={{ margin: '0 0 0.5rem 0' }}>Browser Preview</h4>
+                  <iframe
+                    title="HTML preview"
+                    sandbox="allow-scripts"
+                    src={htmlPreview}
+                    style={{
+                      width: '100%',
+                      height: '280px',
+                      border: '1px solid rgba(255,255,255,0.15)',
+                      background: 'white'
+                    }}
+                  />
+                </div>
+              )}
               {runError ? (
                 <pre className="error-result">{runError}</pre>
               ) : (

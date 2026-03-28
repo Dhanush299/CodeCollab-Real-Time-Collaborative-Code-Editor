@@ -18,7 +18,21 @@ const router = express_1.default.Router();
 // Execute code
 router.post('/', auth_1.auth, [
     (0, express_validator_1.body)('code').isString().isLength({ max: 10000 }),
-    (0, express_validator_1.body)('language').isIn(['javascript', 'python', 'java', 'cpp', 'c', 'ruby', 'php', 'go', 'rust', 'typescript']),
+    (0, express_validator_1.body)('language').isIn([
+        'javascript',
+        'python',
+        'java',
+        'cpp',
+        'c',
+        'ruby',
+        'php',
+        'go',
+        'rust',
+        'typescript',
+        'html',
+        'css',
+        'markdown'
+    ]),
     (0, express_validator_1.body)('input').optional().isString().isLength({ max: 1000 })
 ], async (req, res) => {
     try {
@@ -35,6 +49,15 @@ router.post('/', auth_1.auth, [
                     break;
                 case 'python':
                     result = await executePython(code, input);
+                    break;
+                case 'html':
+                    result = await executeHtml(code, input);
+                    break;
+                case 'css':
+                    result = await executeCss(code, input);
+                    break;
+                case 'markdown':
+                    result = await executeMarkdown(code, input);
                     break;
                 case 'java':
                     result = await executeJava(code, input);
@@ -105,6 +128,69 @@ function getTempDir() {
     // Using cwd keeps temp files in backend/temp as before.
     return path_1.default.join(process.cwd(), 'temp');
 }
+async function runCommandWithStdin(command, args, input, timeoutMs, maxBufferBytes) {
+    return new Promise((resolve, reject) => {
+        const child = (0, child_process_1.spawn)(command, args, { windowsHide: true });
+        let stdout = '';
+        let stderr = '';
+        let timedOut = false;
+        const timeout = setTimeout(() => {
+            timedOut = true;
+            child.kill();
+        }, timeoutMs);
+        child.stdout.on('data', (d) => {
+            stdout += d.toString();
+            if (stdout.length > maxBufferBytes) {
+                clearTimeout(timeout);
+                child.kill();
+                reject(new Error('Output limit exceeded'));
+            }
+        });
+        child.stderr.on('data', (d) => {
+            stderr += d.toString();
+            if (stderr.length > maxBufferBytes) {
+                clearTimeout(timeout);
+                child.kill();
+                reject(new Error('Error output limit exceeded'));
+            }
+        });
+        child.on('error', (err) => {
+            clearTimeout(timeout);
+            reject(err);
+        });
+        child.on('close', (code) => {
+            clearTimeout(timeout);
+            if (timedOut) {
+                reject(new Error(`Execution timed out after ${timeoutMs}ms`));
+                return;
+            }
+            if (code === 0) {
+                resolve({ stdout, stderr });
+            }
+            else {
+                const err = new Error(`Command failed with exit code ${code}`);
+                err.stdout = stdout;
+                err.stderr = stderr;
+                reject(err);
+            }
+        });
+        // Feed stdin for languages that rely on input().
+        // Write (even empty) so stdin is properly initialized, then end it.
+        if (typeof input === 'string') {
+            child.stdin.write(input);
+        }
+        child.stdin.end();
+    });
+}
+function isCommandMissing(err) {
+    const msg = String(err?.message || '').toLowerCase();
+    return (err?.code === 'ENOENT' ||
+        msg.includes('not recognized') ||
+        msg.includes('is not recognized') ||
+        msg.includes('cannot find') ||
+        msg.includes('no such file') ||
+        msg.includes('executable'));
+}
 // Execute JavaScript code safely
 async function executeJavaScript(code, input) {
     const startTime = Date.now();
@@ -121,6 +207,12 @@ async function executeJavaScript(code, input) {
                 },
                 process: {
                     stdin: input
+                },
+                // Some users write alert() in their HTML scripts; map it to console output.
+                alert: (...args) => {
+                    if (!vm.output)
+                        vm.output = [];
+                    vm.output.push(args.join(' '));
                 }
             }
         });
@@ -151,34 +243,48 @@ async function executePython(code, input) {
         const tempFile = path_1.default.join(tempDir, `temp_${Date.now()}.py`);
         await fs_1.promises.writeFile(tempFile, code);
         const isWindows = process.platform === 'win32';
-        const pythonCmd = isWindows ? 'python' : 'python3';
-        let stdout;
-        let stderr;
+        // Windows can have Python exposed as `py` instead of `python`.
+        const candidates = isWindows
+            ? [
+                { command: 'python', args: [tempFile] },
+                { command: 'python3', args: [tempFile] },
+                { command: 'py', args: ['-3', tempFile] },
+                { command: 'py', args: [tempFile] }
+            ]
+            : [
+                { command: 'python3', args: [tempFile] },
+                { command: 'python', args: [tempFile] }
+            ];
         let lastError = null;
-        for (const cmd of [pythonCmd, isWindows ? 'python3' : 'python']) {
+        for (const candidate of candidates) {
             try {
-                const result = await execAsync(`${cmd} "${tempFile}"`, {
-                    timeout: 10000,
-                    input,
-                    maxBuffer: 1024 * 1024
-                });
-                stdout = result.stdout;
-                stderr = result.stderr;
-                lastError = null;
-                break;
+                const { stdout, stderr } = await runCommandWithStdin(candidate.command, candidate.args, input, 10000, 1024 * 1024);
+                await fs_1.promises.unlink(tempFile).catch(() => { });
+                const executionTime = Date.now() - startTime;
+                return {
+                    output: stdout || '',
+                    error: stderr || '',
+                    executionTime
+                };
             }
             catch (error) {
                 lastError = error;
-                continue;
+                // If the command itself is missing, try next candidate.
+                // Otherwise (syntax error, runtime error, timeout), don't mask it
+                // by trying a different Python binary.
+                if (isCommandMissing(error)) {
+                    continue;
+                }
+                break;
             }
         }
         await fs_1.promises.unlink(tempFile).catch(() => { });
-        if (lastError)
-            throw lastError;
         const executionTime = Date.now() - startTime;
         return {
-            output: stdout || '',
-            error: stderr || '',
+            output: '',
+            error: lastError?.stderr ||
+                lastError?.message ||
+                'Python execution failed. Make sure Python is installed and available on PATH.',
             executionTime
         };
     }
@@ -201,6 +307,54 @@ async function executePython(code, input) {
             executionTime
         };
     }
+}
+// Execute HTML by running inline <script> blocks as JavaScript.
+// If there are no <script> tags, we return extracted text content so the UI shows something.
+async function executeHtml(code, input) {
+    const startTime = Date.now();
+    try {
+        const scriptMatches = Array.from(code.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/gi)).map((m) => m[1] || '');
+        if (scriptMatches.length > 0) {
+            const inlineJs = scriptMatches.join('\n');
+            return await executeJavaScript(inlineJs, input);
+        }
+        // Basic text extraction: remove comments/styles/scripts, then strip tags.
+        const text = code
+            .replace(/<!--[\s\S]*?-->/g, ' ')
+            .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, ' ')
+            .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, ' ')
+            .replace(/<[^>]+>/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim();
+        return {
+            output: text,
+            error: '',
+            executionTime: Date.now() - startTime
+        };
+    }
+    catch (error) {
+        return {
+            output: '',
+            error: error?.message || 'HTML execution failed',
+            executionTime: Date.now() - startTime
+        };
+    }
+}
+// CSS/Markdown don't have a meaningful "execution" in this sandbox.
+// We return their content so the modal always shows something.
+async function executeCss(code, _input) {
+    return {
+        output: code,
+        error: '',
+        executionTime: 0
+    };
+}
+async function executeMarkdown(code, _input) {
+    return {
+        output: code,
+        error: '',
+        executionTime: 0
+    };
 }
 // Execute Java code
 async function executeJava(code, input) {

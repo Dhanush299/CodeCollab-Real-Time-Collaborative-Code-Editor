@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Simple Login</title>
+
+      <script>
+        (function() {
+          function stringifyArgs(args) {
+            try { return Array.prototype.slice.call(args).map(function(a){ return String(a); }).join(' '); }
+            catch (e) { return ''; }
+          }
+          function send(type, msg) {
+            try {
+              window.parent.postMessage({ __codecollabRun: true, type: type, message: msg }, '*');
+            } catch (e) {}
+          }
+          var origLog = console.log;
+          console.log = function() {
+            try { origLog.apply(console, arguments); } catch(e) {}
+            send('log', stringifyArgs(arguments));
+          };
+          var origError = console.error;
+          console.error = function() {
+            try { origError.apply(console, arguments); } catch(e) {}
+            send('error', stringifyArgs(arguments));
+          };
+        })();
+      </script>
+    </head>
+<body>
+
+  <h2>Login</h2>
+
+  <input type="text" id="username" placeholder="Username"><br><br>
+  <input type="password" id="password" placeholder="Password"><br><br>
+
+  <button onclick="login()">Login</button>
+
+  <p id="message"></p>
+
+  <script>
+    function login() {
+      let user = document.getElementById("username").value;
+      let pass = document.getElementById("password").value;
+
+      if (user === "admin" && pass === "1234") {
+        document.getElementById("message").innerText = "Login Successful!";
+      } else {
+        document.getElementById("message").innerText = "Invalid Credentials!";
+      }
+    }
+  </script>
+
+</body>
+</html>

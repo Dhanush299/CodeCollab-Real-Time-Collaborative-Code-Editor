@@ -21,6 +21,7 @@ import repositoryRoutes from './routes/repositories';
 import fileRoutes from './routes/files';
 import roomRoutes from './routes/rooms';
 import executionRoutes from './routes/execution';
+import previewRoutes from './routes/preview';
 import aiRoutes from './routes/ai';
 import { setIO } from './socket';
 import { logRoomActivity } from './utils/logRoomActivity';
@@ -51,6 +52,7 @@ app.use('/api/repositories', repositoryRoutes);
 app.use('/api/files', fileRoutes);
 app.use('/api/rooms', roomRoutes);
 app.use('/api/execute', executionRoutes);
+app.use('/api/preview', previewRoutes);
 app.use('/api/ai', aiRoutes);
 
 // Connect to MongoDB

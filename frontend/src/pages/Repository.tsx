@@ -319,6 +319,7 @@ const Repository = () => {
         <RunCodeModal
           onClose={() => setShowRunModal(false)}
           file={currentFile}
+          repoFiles={files}
           getEditorContent={() => editorRef.current?.getValue() || editorContent}
         />
       )}

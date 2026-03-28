@@ -26,6 +26,7 @@ const repositories_1 = __importDefault(require("./routes/repositories"));
 const files_1 = __importDefault(require("./routes/files"));
 const rooms_1 = __importDefault(require("./routes/rooms"));
 const execution_1 = __importDefault(require("./routes/execution"));
+const preview_1 = __importDefault(require("./routes/preview"));
 const ai_1 = __importDefault(require("./routes/ai"));
 const socket_1 = require("./socket");
 const logRoomActivity_1 = require("./utils/logRoomActivity");
@@ -52,6 +53,7 @@ app.use('/api/repositories', repositories_1.default);
 app.use('/api/files', files_1.default);
 app.use('/api/rooms', rooms_1.default);
 app.use('/api/execute', execution_1.default);
+app.use('/api/preview', preview_1.default);
 app.use('/api/ai', ai_1.default);
 // Connect to MongoDB
 mongoose_1.default
