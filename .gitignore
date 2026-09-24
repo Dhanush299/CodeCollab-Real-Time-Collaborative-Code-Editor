@@ -1,0 +1,31 @@
+# Secrets
+backend/.env
+backend/.env.backup
+.env
+.env.*
+!.env.example
+
+# Dependencies and generated output
+**/node_modules/
+frontend/build/
+backend/dist/
+backend/temp/
+**/coverage/
+*.tsbuildinfo
+
+# Package-manager and runtime logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+*.log
+
+# Local tooling
+.aws/
+.docker/
+.vscode/
+.idea/
+
+# Operating-system files
+.DS_Store
+Thumbs.db

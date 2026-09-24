@@ -346,14 +346,18 @@ const Room = () => {
         const uid = data.userId || data.user?._id || data.user;
         if (!uid) return;
         const nextRole = data.role || 'viewer';
-        setParticipants((prev) =>
-          prev.map((p) => {
-            const pid = p.user?._id || p.user || p._id;
-            if (pid && String(pid) === String(uid)) {
-              return { ...p, role: nextRole };
-            }
-            return p;
-          })
+        const updateRole = (participant) => {
+          const pid = participant.user?._id || participant.user || participant._id;
+          return pid && String(pid) === String(uid) ? { ...participant, role: nextRole } : participant;
+        };
+
+        // `participants` drives the participant list, while `room.participants`
+        // drives `getUserRole()` and editor permissions. Keep both in sync.
+        setParticipants((prev) => prev.map(updateRole));
+        setRoom((prev) =>
+          prev
+            ? { ...prev, participants: (prev.participants || []).map(updateRole) }
+            : prev
         );
       });
 

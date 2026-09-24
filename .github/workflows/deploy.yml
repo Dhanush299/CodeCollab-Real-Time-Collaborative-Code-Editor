@@ -1,0 +1,101 @@
+name: Deploy CodeCollab to AWS
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Cancel an older queued deployment when a newer commit is pushed.
+concurrency:
+  group: codecollab-production
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  AWS_REGION: ap-south-1
+  ECR_REPOSITORY: codecollab-api
+  ECS_CLUSTER: codecollab-cluster
+  ECS_SERVICE: codecollab-api-service-f7amut6o
+  ECS_TASK_FAMILY: codecollab-api
+  S3_BUCKET: codecollab-frontend-245846690615
+
+jobs:
+  deploy:
+    name: Build and deploy
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials through OIDC
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Log in to Amazon ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push backend image
+        env:
+          REGISTRY: ${{ steps.ecr-login.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          docker build --platform linux/amd64 -t "$REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" ./backend
+          docker push "$REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+
+      - name: Get the CloudFront domain
+        id: cloudfront
+        env:
+          DISTRIBUTION_ID: ${{ vars.CLOUDFRONT_DISTRIBUTION_ID }}
+        run: |
+          test -n "$DISTRIBUTION_ID"
+          DOMAIN=$(aws cloudfront get-distribution --id "$DISTRIBUTION_ID" --query 'Distribution.DomainName' --output text)
+          echo "domain=$DOMAIN" >> "$GITHUB_OUTPUT"
+
+      - name: Build frontend
+        working-directory: frontend
+        env:
+          REACT_APP_API_URL: https://${{ steps.cloudfront.outputs.domain }}/api
+          REACT_APP_SOCKET_URL: https://${{ steps.cloudfront.outputs.domain }}
+          DISABLE_ESLINT_PLUGIN: 'true'
+        run: |
+          npm ci
+          npm run build
+
+      - name: Publish frontend to S3
+        run: |
+          aws s3 sync ./frontend/build "s3://$S3_BUCKET" --delete --exclude index.html
+          aws s3 cp ./frontend/build/index.html "s3://$S3_BUCKET/index.html" --cache-control no-cache
+
+      - name: Create a new CloudFront invalidation
+        env:
+          DISTRIBUTION_ID: ${{ vars.CLOUDFRONT_DISTRIBUTION_ID }}
+        run: aws cloudfront create-invalidation --distribution-id "$DISTRIBUTION_ID" --paths '/*'
+
+      - name: Register an ECS task definition with the new image
+        id: task-definition
+        env:
+          REGISTRY: ${{ steps.ecr-login.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          aws ecs describe-task-definition --task-definition "$ECS_TASK_FAMILY" --query taskDefinition --output json > current-task-definition.json
+          jq --arg image "$REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" \
+            '.containerDefinitions |= map(if .name == "codecollab-api" then .image = $image else . end) |
+             del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .compatibilities, .registeredAt, .registeredBy, .deregisteredAt)' \
+            current-task-definition.json > next-task-definition.json
+          TASK_DEFINITION_ARN=$(aws ecs register-task-definition --cli-input-json file://next-task-definition.json --query 'taskDefinition.taskDefinitionArn' --output text)
+          echo "arn=$TASK_DEFINITION_ARN" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy backend to ECS
+        env:
+          TASK_DEFINITION_ARN: ${{ steps.task-definition.outputs.arn }}
+        run: |
+          aws ecs update-service --cluster "$ECS_CLUSTER" --service "$ECS_SERVICE" --task-definition "$TASK_DEFINITION_ARN" --force-new-deployment
+          aws ecs wait services-stable --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE"
